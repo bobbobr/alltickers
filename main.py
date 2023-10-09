@@ -51,6 +51,8 @@ chart_data_cache = {}
 
 start_time = time.time()
 
+
+@st.cache_data
 def fetch_chart_data(pool_id):
     if pool_id in chart_data_cache:
         return chart_data_cache[pool_id]
@@ -68,6 +70,8 @@ def fetch_chart_data(pool_id):
         #st.write(f"Error: {e}")
         return None
 
+
+@st.cache_data
 def calculate_tvl(data, start, end):
     change_tvl = []
 
