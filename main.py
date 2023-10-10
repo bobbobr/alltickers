@@ -3,6 +3,8 @@ import requests
 import streamlit as st
 import json
 import time
+import asyncio
+import aiohttp
 
 baseUrl = "https://yields.llama.fi"
 
@@ -52,31 +54,54 @@ chart_data_cache = {}
 start_time = time.time()
 
 
-@st.cache_data
-def fetch_chart_data(pool_id):
-    if pool_id in chart_data_cache:
-        return chart_data_cache[pool_id]
-
+async def fetch_chart_data_async(_session, pool_id):
     baseUrl3 = "https://yields.llama.fi/chart/"
     url = baseUrl3 + pool_id
-    try:
-        response = requests.get(url)
-        time.sleep(1)
-        response.raise_for_status()
-        data = response.json()["data"]
-        chart_data_cache[pool_id] = pd.DataFrame.from_dict(data)
-        return chart_data_cache[pool_id]
-    except (requests.exceptions.HTTPError, json.JSONDecodeError) as e:
-        #st.write(f"Error: {e}")
-        return None
+    async with _session.get(url) as response:
+        if response.status == 200:
+            data = await response.json()
+            return pd.DataFrame.from_dict(data.get("data", []))
+        else:
+            return None
+
+
+async def fetch_all_chart_data(pool_ids):
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_chart_data_async(session, pool_id) for pool_id in pool_ids]
+        return await asyncio.gather(*tasks)
+
+
+async def fetch_all_chart_data_async(data):
+    pool_ids = data.pool.tolist()
+    chart_data = await fetch_all_chart_data(pool_ids)
+    for i, pool_id in enumerate(pool_ids):
+        chart_data_cache[pool_id] = chart_data[i]
 
 
 @st.cache_data
-def calculate_tvl(data, start, end):
+async def fetch_and_calculate(pool_id, change_tvl, start, end):
+    da = await fetch_chart_data_async(pool_id)
+    if da is not None and len(da) > (end - start):
+        change_in_second_column = da["tvlUsd"].iloc[end] / da["tvlUsd"].iloc[start] - 1
+        change_tvl.append(round(change_in_second_column * 100, 2))
+    else:
+        change_tvl.append(0)
+
+
+async def calculate_tvl_async(data, _session, start, end):
     change_tvl = []
+    tasks = []
 
     for pool_id in data.pool:
-        da = fetch_chart_data(pool_id)
+        # Schedule the asynchronous fetch
+        tasks.append(fetch_chart_data_async(_session, pool_id))
+
+
+    # Await all tasks
+    chart_data = await asyncio.gather(*tasks)
+
+    for i, pool_id in enumerate(data.pool):
+        da = chart_data[i]
         if da is not None and len(da) > (end - start):
             change_in_second_column = da["tvlUsd"].iloc[end] / da["tvlUsd"].iloc[start] - 1
             change_tvl.append(round(change_in_second_column * 100, 2))
@@ -86,9 +111,17 @@ def calculate_tvl(data, start, end):
     return change_tvl
 
 remember = protocolDatast.sort_values(by=sel, ascending=False)
-remember["tvlPct1D"] = calculate_tvl(protocolDatast.sort_values(by=sel, ascending=False), 0, 1)
-remember["tvlPct7D"] = calculate_tvl(protocolDatast.sort_values(by=sel, ascending=False), 0, 7)
-remember["tvlPct30D"] = calculate_tvl(protocolDatast.sort_values(by=sel, ascending=False), 0, 30)
+
+# Create an aiohttp ClientSession
+async def main():
+    async with aiohttp.ClientSession() as session:
+        # Call calculate_tvl_async with the session
+        remember["tvlPct1D"] = await calculate_tvl_async(protocolDatast.sort_values(by=sel, ascending=False), session, 0, 1)
+        remember["tvlPct7D"] = await calculate_tvl_async(protocolDatast.sort_values(by=sel, ascending=False), session, 0, 7)
+        remember["tvlPct30D"] = await calculate_tvl_async(protocolDatast.sort_values(by=sel, ascending=False), session, 0, 30)
+
+# Run the main function
+asyncio.run(main())
 
 end_time = time.time()
 
@@ -114,7 +147,7 @@ st.write(filtered_data)
 def convert_df(df):
     return df.to_csv().encode('utf-8')
 
-new_csv = convert_df(protocolDatast)
+new_csv = convert_df(remember)
 
 st.download_button(
     label="Download data as CSV for all",
